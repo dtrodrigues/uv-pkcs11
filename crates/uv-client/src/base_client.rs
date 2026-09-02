@@ -16,6 +16,9 @@ use reqwest::{
 use reqwest_middleware::{ClientWithMiddleware, Middleware};
 use reqwest_retry::policies::ExponentialBackoff;
 use reqwest_retry::{Jitter, RetryTransientMiddleware};
+use rustls::ClientConfig;
+use rustls::client::ResolvesClientCert;
+use rustls_pkcs11_identity::{Pkcs11ClientIdentity, Pkcs11IdentityError};
 use thiserror::Error;
 use tracing::{debug, warn};
 use url::ParseError;
@@ -44,6 +47,62 @@ use crate::{Connectivity, MetadataRangeRequest, RetriableError, RetryState, UvRe
 
 pub const DEFAULT_RETRIES: u32 = 3;
 
+fn configure_http_alpn(config: &mut ClientConfig) {
+    // Match reqwest's default `HttpVersionPref::All` configuration when its
+    // `http2` feature is enabled.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+}
+
+/// The server-certificate verification source for the PKCS#11 TLS
+/// configuration, mirroring reqwest's rustls backend.
+enum Pkcs11ServerVerification {
+    /// Custom roots from `--cert`, `SSL_CERT_FILE`, or `SSL_CERT_DIR`.
+    CustomRoots(rustls::RootCertStore),
+    /// The operating-system trust store, via `rustls-platform-verifier`.
+    Platform,
+    /// The bundled webpki roots.
+    WebpkiRoots(rustls::RootCertStore),
+}
+
+fn pkcs11_server_verification(
+    custom_certificates: Option<&Certificates>,
+    system_certs: bool,
+) -> Pkcs11ServerVerification {
+    if let Some(certificates) = custom_certificates {
+        Pkcs11ServerVerification::CustomRoots(certificates.to_root_store())
+    } else if system_certs {
+        Pkcs11ServerVerification::Platform
+    } else {
+        Pkcs11ServerVerification::WebpkiRoots(Certificates::webpki_roots().to_root_store())
+    }
+}
+
+/// A rustls `ClientConfig` with the PKCS#11 resolver that otherwise matches
+/// what reqwest builds itself: same crypto provider, verifier, and ALPN.
+fn pkcs11_tls_config(
+    verification: Pkcs11ServerVerification,
+    resolver: Arc<dyn ResolvesClientCert>,
+) -> Result<ClientConfig, rustls::Error> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?;
+    let mut config =
+        match verification {
+            Pkcs11ServerVerification::CustomRoots(roots)
+            | Pkcs11ServerVerification::WebpkiRoots(roots) => builder.with_root_certificates(roots),
+            Pkcs11ServerVerification::Platform => builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(
+                    rustls_platform_verifier::Verifier::new(provider)?,
+                )),
+        }
+        .with_client_cert_resolver(resolver);
+    configure_http_alpn(&mut config);
+    Ok(config)
+}
+
 /// Maximum number of redirects to follow before giving up.
 ///
 /// This is the default used by [`reqwest`].
@@ -71,6 +130,10 @@ pub enum ClientBuildError {
     Credentials(#[from] CredentialsFromUrlError),
     #[error(transparent)]
     IndexCredentials(#[from] IndexCredentialsError),
+    #[error("failed to configure PKCS#11 client identity")]
+    Pkcs11(#[from] Pkcs11IdentityError),
+    #[error("failed to configure TLS for the PKCS#11 client")]
+    Tls(#[from] rustls::Error),
 }
 
 /// Selectively skip parts or the entire auth middleware.
@@ -620,15 +683,39 @@ impl<'a> BaseClientBuilder<'a> {
             client_builder.tls_certs_only(Certificates::webpki_roots().to_reqwest_certs())
         };
 
-        // Configure mTLS.
-        let client_builder = if let Some(ssl_client_cert) = env::var_os(EnvVars::SSL_CLIENT_CERT) {
-            match read_identity(&ssl_client_cert) {
+        // Configure mTLS. A `pkcs11:` URI in `SSL_CLIENT_CERT` names a
+        // PKCS#11 identity; any other value is a PEM file path.
+        let ssl_client_cert = env::var_os(EnvVars::SSL_CLIENT_CERT);
+        let pkcs11_uri = ssl_client_cert
+            .as_ref()
+            .and_then(|value| value.to_str())
+            .filter(|value| value.starts_with("pkcs11:"))
+            .map(str::to_owned);
+        let client_builder = match &ssl_client_cert {
+            Some(value) if pkcs11_uri.is_none() => match read_identity(value) {
                 Ok(identity) => client_builder.identity(identity),
                 Err(err) => {
                     warn_user_once!("Ignoring invalid `SSL_CLIENT_CERT`: {err}");
                     client_builder
                 }
+            },
+            _ => client_builder,
+        };
+
+        // PKCS#11 activates only through an explicit `pkcs11:` URI, which
+        // must resolve to exactly one identity, and the identity is only
+        // ever presented over verified HTTPS.
+        let pkcs11_identity = match &pkcs11_uri {
+            Some(uri) if matches!(security, Security::Secure) => {
+                Some(Pkcs11ClientIdentity::from_uri(uri)?)
             }
+            _ => None,
+        };
+        let client_builder = if let Some(identity) = pkcs11_identity {
+            let verification =
+                pkcs11_server_verification(self.custom_certificates.as_ref(), self.system_certs);
+            let config = pkcs11_tls_config(verification, identity.resolver())?;
+            client_builder.tls_backend_preconfigured(config)
         } else {
             client_builder
         };
@@ -1228,8 +1315,75 @@ mod tests {
 
     use anyhow::{Context, Result};
     use reqwest::{Client, Method};
+    use rustls::RootCertStore;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn pkcs11_tls_config_enables_http2_with_http1_fallback() {
+        let mut config = ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+
+        configure_http_alpn(&mut config);
+
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn pkcs11_server_verification_matches_certificate_sources() {
+        // Custom certificates win even when system certificates are enabled.
+        let custom = Certificates::webpki_roots();
+        assert!(matches!(
+            &pkcs11_server_verification(Some(&custom), true),
+            Pkcs11ServerVerification::CustomRoots(roots) if !roots.is_empty()
+        ));
+        assert!(matches!(
+            pkcs11_server_verification(None, true),
+            Pkcs11ServerVerification::Platform
+        ));
+        assert!(matches!(
+            &pkcs11_server_verification(None, false),
+            Pkcs11ServerVerification::WebpkiRoots(roots) if !roots.is_empty()
+        ));
+    }
+
+    /// A stand-in for the PKCS#11 resolver in TLS configuration tests.
+    #[derive(Debug)]
+    struct NoClientCert;
+
+    impl ResolvesClientCert for NoClientCert {
+        fn resolve(
+            &self,
+            _root_hint_subjects: &[&[u8]],
+            _sigschemes: &[rustls::SignatureScheme],
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            None
+        }
+
+        fn has_certs(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn pkcs11_tls_config_builds_for_each_verification_source() {
+        for verification in [
+            Pkcs11ServerVerification::Platform,
+            Pkcs11ServerVerification::WebpkiRoots(Certificates::webpki_roots().to_root_store()),
+            Pkcs11ServerVerification::CustomRoots(Certificates::webpki_roots().to_root_store()),
+        ] {
+            let config = pkcs11_tls_config(verification, Arc::new(NoClientCert)).unwrap();
+            assert_eq!(
+                config.alpn_protocols,
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+            );
+            assert!(!config.client_auth_cert_resolver.has_certs());
+        }
+    }
 
     #[tokio::test]
     async fn cache_read_runtime_can_be_dropped_from_an_async_context() {
