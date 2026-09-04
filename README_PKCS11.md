@@ -110,11 +110,13 @@ equal to `0.12.9`, so re-releases start at `.1`.
 this fork with official uv binaries.
 
 The binary identifies itself as the fork: `uv --version` and `uv self version`
-end with a `[uv-pkcs11]` marker, and `uv self version --output-format json`
-reports `"package_name": "uv-pkcs11"`, so you can confirm which build is
+end with a `[uv-pkcs11 <fork version>]` marker naming the exact fork release (the
+version itself stays the upstream version so `required-version` checks keep
+working), and `uv self version --output-format json`
+reports `"package_name": "uv-pkcs11"` and `"fork_version"`, so you can confirm which build is
 installed.
 
 ```console
 $ uv --version
-uv 0.12.9 (1a2b3c4d5 2026-09-01 aarch64-apple-darwin) [uv-pkcs11]
+uv 0.12.9 (1a2b3c4d5 2026-09-01 aarch64-apple-darwin) [uv-pkcs11 0.12.9.1]
 ```

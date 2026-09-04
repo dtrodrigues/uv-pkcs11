@@ -28,6 +28,9 @@ pub struct SelfVersionInfo {
     package_name: String,
     /// Version, such as "0.5.1".
     version: String,
+    /// Version of the uv-pkcs11 distribution, such as "0.5.1.1": the upstream
+    /// `version` with a fourth component for fork re-releases.
+    fork_version: String,
     /// Information about the git commit we may have been built from.
     ///
     /// `None` if not built from a git repo or if retrieval failed.
@@ -69,11 +72,13 @@ impl SelfVersionInfo {
 
 impl fmt::Display for SelfVersionInfo {
     /// Formatted version information:
-    /// "<version>[+<commits>] ([<commit> <date> ]<target>) [<fork package name>]"
+    /// "<version>[+<commits>] ([<commit> <date> ]<target>) [<fork package name> <fork version>]"
     ///
     /// This is intended for consumption by `clap` to provide `uv --version`,
     /// and intentionally omits the `uv` command name; the trailing fork marker
-    /// identifies the build as [`FORK_PACKAGE_NAME`] rather than official uv.
+    /// identifies the build as [`FORK_PACKAGE_NAME`] rather than official uv,
+    /// and names the exact fork release, while `<version>` stays the upstream
+    /// version that `required-version` is checked against.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.version)?;
         if let Some(ci) = &self.commit_info {
@@ -88,7 +93,7 @@ impl fmt::Display for SelfVersionInfo {
         } else {
             write!(f, " ({})", self.target_triple)?;
         }
-        write!(f, " [{}]", self.package_name)?;
+        write!(f, " [{} {}]", self.package_name, self.fork_version)?;
         Ok(())
     }
 }
@@ -141,9 +146,14 @@ pub fn uv_self_version() -> SelfVersionInfo {
     // Set by `uv-cli/build.rs`
     let target_triple = env!("RUST_HOST_TARGET").to_string();
 
+    // Set by `uv-cli/build.rs` from `pyproject.toml`; the crate version when
+    // building without the distribution's `pyproject.toml`.
+    let fork_version = option_env_str!("UV_PKCS11_VERSION").unwrap_or_else(|| version.clone());
+
     SelfVersionInfo {
         package_name: FORK_PACKAGE_NAME.to_owned(),
         version,
+        fork_version,
         commit_info,
         target_triple,
     }
@@ -160,10 +170,11 @@ mod tests {
         let version = SelfVersionInfo {
             package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
+            fork_version: "0.0.0.1".to_string(),
             commit_info: None,
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0 (x86_64-unknown-linux-gnu) [uv-pkcs11]");
+        assert_snapshot!(version, @"0.0.0 (x86_64-unknown-linux-gnu) [uv-pkcs11 0.0.0.1]");
     }
 
     #[test]
@@ -171,6 +182,7 @@ mod tests {
         let version = SelfVersionInfo {
             package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
+            fork_version: "0.0.0.1".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
                 commit_hash: "53b0f5d924110e5b26fbf09f6fd3a03d67b475b7".to_string(),
@@ -180,7 +192,7 @@ mod tests {
             }),
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11]");
+        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11 0.0.0.1]");
     }
 
     #[test]
@@ -188,6 +200,7 @@ mod tests {
         let version = SelfVersionInfo {
             package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
+            fork_version: "0.0.0.1".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
                 commit_hash: "53b0f5d924110e5b26fbf09f6fd3a03d67b475b7".to_string(),
@@ -197,7 +210,7 @@ mod tests {
             }),
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11]");
+        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11 0.0.0.1]");
     }
 
     #[test]
@@ -205,6 +218,7 @@ mod tests {
         let version = SelfVersionInfo {
             package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
+            fork_version: "0.0.0.1".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
                 commit_hash: "53b0f5d924110e5b26fbf09f6fd3a03d67b475b7".to_string(),
@@ -218,6 +232,7 @@ mod tests {
         {
           "package_name": "uv-pkcs11",
           "version": "0.0.0",
+          "fork_version": "0.0.0.1",
           "commit_info": {
             "short_commit_hash": "53b0f5d92",
             "commit_hash": "53b0f5d924110e5b26fbf09f6fd3a03d67b475b7",

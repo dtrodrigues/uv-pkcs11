@@ -2248,7 +2248,8 @@ fn version_get_missing_with_hint() -> Result<()> {
 // (also setup a honeypot project and make sure it's not used)
 #[test]
 fn self_version() -> Result<()> {
-    let context = uv_test::test_context!("3.12");
+    let context = uv_test::test_context!("3.12")
+        .with_filter((r"\[uv-pkcs11 \d+(\.\d+)+\]", "[uv-pkcs11 [FORK_VERSION]]"));
 
     let pyproject_toml = context.temp_dir.child("pyproject.toml");
     pyproject_toml.write_str(
@@ -2262,7 +2263,7 @@ fn self_version() -> Result<()> {
     uv_snapshot!(context.filters(), context.self_version(), @"
     exit_code: 0 (success)
     ----- stdout -----
-    uv [VERSION] ([COMMIT] DATE) [uv-pkcs11]
+    uv [VERSION] ([COMMIT] DATE) [uv-pkcs11 [FORK_VERSION]]
     ");
 
     let pyproject = fs_err::read_to_string(&pyproject_toml)?;
@@ -2324,8 +2325,12 @@ fn self_version_short() -> Result<()> {
 fn self_version_json() -> Result<()> {
     let context = uv_test::test_context!("3.12")
         .with_filter((
-            r#"version": "\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?(\+\d+)?""#,
-            r#"version": "[VERSION]""#,
+            r#""version": "\d+\.\d+\.\d+(-(alpha|beta|rc)\.\d+)?(\+\d+)?""#,
+            r#""version": "[VERSION]""#,
+        ))
+        .with_filter((
+            r#""fork_version": ".*""#,
+            r#""fork_version": "[FORK_VERSION]""#,
         ))
         .with_filter((
             r#""short_commit_hash": ".*""#,
@@ -2357,6 +2362,7 @@ fn self_version_json() -> Result<()> {
         {
           "package_name": "uv-pkcs11",
           "version": "[VERSION]",
+          "fork_version": "[FORK_VERSION]",
           "commit_info": {
             "short_commit_hash": "[HASH]",
             "commit_hash": "[LONGHASH]",
@@ -2375,6 +2381,7 @@ fn self_version_json() -> Result<()> {
       {
         "package_name": "uv-pkcs11",
         "version": "[VERSION]",
+        "fork_version": "[FORK_VERSION]",
         "commit_info": null,
         "target_triple": "[TARGET]"
       }
