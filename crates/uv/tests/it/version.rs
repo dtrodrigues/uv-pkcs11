@@ -2262,7 +2262,7 @@ fn self_version() -> Result<()> {
     uv_snapshot!(context.filters(), context.self_version(), @"
     exit_code: 0 (success)
     ----- stdout -----
-    uv [VERSION] ([COMMIT] DATE)
+    uv [VERSION] ([COMMIT] DATE) [uv-pkcs11]
     ");
 
     let pyproject = fs_err::read_to_string(&pyproject_toml)?;
@@ -2355,7 +2355,7 @@ fn self_version_json() -> Result<()> {
         exit_code: 0 (success)
         ----- stdout -----
         {
-          "package_name": "uv",
+          "package_name": "uv-pkcs11",
           "version": "[VERSION]",
           "commit_info": {
             "short_commit_hash": "[HASH]",
@@ -2373,7 +2373,7 @@ fn self_version_json() -> Result<()> {
       exit_code: 0 (success)
       ----- stdout -----
       {
-        "package_name": "uv",
+        "package_name": "uv-pkcs11",
         "version": "[VERSION]",
         "commit_info": null,
         "target_triple": "[TARGET]"

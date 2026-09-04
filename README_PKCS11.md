@@ -91,3 +91,13 @@ Wheel versions mirror the upstream uv release the fork is built from (e.g.
 `0.12.9`); `.postN` marks a fork-side re-release of the same upstream base.
 `uv self update` support is intentionally not built in — it would replace
 this fork with official uv binaries.
+
+The binary identifies itself as the fork: `uv --version` and `uv self version`
+end with a `[uv-pkcs11]` marker, and `uv self version --output-format json`
+reports `"package_name": "uv-pkcs11"`, so you can confirm which build is
+installed.
+
+```console
+$ uv --version
+uv 0.12.9 (1a2b3c4d5 2026-09-01 aarch64-apple-darwin) [uv-pkcs11]
+```

@@ -7,6 +7,10 @@ use serde::Serialize;
 use uv_normalize::PackageName;
 use uv_pep508::uv_pep440::Version;
 
+/// Name of the fork's distribution, reported in place of `uv` so that a
+/// fork build can be told apart from an official uv release.
+const FORK_PACKAGE_NAME: &str = "uv-pkcs11";
+
 /// Information about the git repository where uv was built from.
 #[derive(Serialize)]
 pub(crate) struct CommitInfo {
@@ -20,7 +24,7 @@ pub(crate) struct CommitInfo {
 /// Version information for uv itself (e.g., in `uv self version`).
 #[derive(Serialize)]
 pub struct SelfVersionInfo {
-    /// Name of the package (always "uv").
+    /// Name of the package (always [`FORK_PACKAGE_NAME`]).
     package_name: String,
     /// Version, such as "0.5.1".
     version: String,
@@ -64,10 +68,12 @@ impl SelfVersionInfo {
 }
 
 impl fmt::Display for SelfVersionInfo {
-    /// Formatted version information: "<version>[+<commits>] ([<commit> <date> ]<target>)"
+    /// Formatted version information:
+    /// "<version>[+<commits>] ([<commit> <date> ]<target>) [<fork package name>]"
     ///
     /// This is intended for consumption by `clap` to provide `uv --version`,
-    /// and intentionally omits the name of the package.
+    /// and intentionally omits the `uv` command name; the trailing fork marker
+    /// identifies the build as [`FORK_PACKAGE_NAME`] rather than official uv.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.version)?;
         if let Some(ci) = &self.commit_info {
@@ -82,6 +88,7 @@ impl fmt::Display for SelfVersionInfo {
         } else {
             write!(f, " ({})", self.target_triple)?;
         }
+        write!(f, " [{}]", self.package_name)?;
         Ok(())
     }
 }
@@ -135,7 +142,7 @@ pub fn uv_self_version() -> SelfVersionInfo {
     let target_triple = env!("RUST_HOST_TARGET").to_string();
 
     SelfVersionInfo {
-        package_name: "uv".to_owned(),
+        package_name: FORK_PACKAGE_NAME.to_owned(),
         version,
         commit_info,
         target_triple,
@@ -146,23 +153,23 @@ pub fn uv_self_version() -> SelfVersionInfo {
 mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
 
-    use super::{CommitInfo, SelfVersionInfo};
+    use super::{CommitInfo, FORK_PACKAGE_NAME, SelfVersionInfo};
 
     #[test]
     fn version_formatting() {
         let version = SelfVersionInfo {
-            package_name: "uv".to_string(),
+            package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
             commit_info: None,
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0 (x86_64-unknown-linux-gnu)");
+        assert_snapshot!(version, @"0.0.0 (x86_64-unknown-linux-gnu) [uv-pkcs11]");
     }
 
     #[test]
     fn version_formatting_with_commit_info() {
         let version = SelfVersionInfo {
-            package_name: "uv".to_string(),
+            package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
@@ -173,13 +180,13 @@ mod tests {
             }),
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu)");
+        assert_snapshot!(version, @"0.0.0 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11]");
     }
 
     #[test]
     fn version_formatting_with_commits_since_last_tag() {
         let version = SelfVersionInfo {
-            package_name: "uv".to_string(),
+            package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
@@ -190,13 +197,13 @@ mod tests {
             }),
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
         };
-        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu)");
+        assert_snapshot!(version, @"0.0.0+24 (53b0f5d92 2023-10-19 x86_64-unknown-linux-gnu) [uv-pkcs11]");
     }
 
     #[test]
     fn version_serializable() {
         let version = SelfVersionInfo {
-            package_name: "uv".to_string(),
+            package_name: FORK_PACKAGE_NAME.to_string(),
             version: "0.0.0".to_string(),
             commit_info: Some(CommitInfo {
                 short_commit_hash: "53b0f5d92".to_string(),
@@ -209,7 +216,7 @@ mod tests {
         };
         assert_json_snapshot!(version, @r#"
         {
-          "package_name": "uv",
+          "package_name": "uv-pkcs11",
           "version": "0.0.0",
           "commit_info": {
             "short_commit_hash": "53b0f5d92",
