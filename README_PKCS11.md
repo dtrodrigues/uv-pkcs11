@@ -103,7 +103,9 @@ other platforms build from the sdist. The distribution installs the `uv` and
 ## Versioning
 
 Wheel versions mirror the upstream uv release the fork is built from (e.g.
-`0.12.9`); `.postN` marks a fork-side re-release of the same upstream base.
+`0.12.9`); a fourth component (`0.12.9.1`, `0.12.9.2`, ...) marks a fork-side
+re-release on the same upstream base. Note that PEP 440 treats `0.12.9.0` as
+equal to `0.12.9`, so re-releases start at `.1`.
 `uv self update` support is intentionally not built in — it would replace
 this fork with official uv binaries.
 

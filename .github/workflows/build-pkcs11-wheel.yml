@@ -1,18 +1,18 @@
 # Build and publish the uv-pkcs11 wheels: Linux (x86_64, aarch64) and
 # macOS (Apple Silicon).
 #
-# Triggered by fork release tags (e.g. `0.12.9-pkcs11`); the package version
-# comes from pyproject.toml's [project] version, mirroring the upstream
-# release with `.postN` for fork-side re-releases (crates/uv/Cargo.toml keeps
-# the plain upstream version: semver cannot express .postN). Publishes to
-# PyPI via trusted publishing (the `pypi` environment).
+# Triggered by fork release tags (e.g. `0.12.9-pkcs11`, `0.12.9.1-pkcs11`);
+# the package version comes from pyproject.toml's [project] version,
+# mirroring the upstream release with a fourth component (`0.12.9.1`) for
+# fork-side re-releases (crates/uv/Cargo.toml keeps the plain upstream
+# version: semver has no fourth component). Publishes to PyPI via trusted
+# publishing (the `pypi` environment).
 name: "Build uv-pkcs11 wheels"
 
 on:
   push:
     tags:
       - "*-pkcs11"
-      - "*-pkcs11.post*"
   workflow_dispatch:
 
 concurrency:
