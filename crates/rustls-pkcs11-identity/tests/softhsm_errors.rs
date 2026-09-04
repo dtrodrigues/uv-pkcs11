@@ -1,6 +1,6 @@
 mod common;
 
-use common::{KeySpec, TokenSpec};
+use common::{KeySpec, TokenSpec, Usage};
 use rustls_pkcs11_identity::{Pkcs11ClientIdentity, Pkcs11IdentityError};
 
 /// Two identities across two tokens is ambiguous.
@@ -14,6 +14,7 @@ fn ambiguity_is_reported() {
                 keys: vec![KeySpec {
                     id: 1,
                     with_certificate: true,
+                    usage: Usage::ClientAuth,
                 }],
                 store_root: false,
             },
@@ -22,6 +23,7 @@ fn ambiguity_is_reported() {
                 keys: vec![KeySpec {
                     id: 2,
                     with_certificate: true,
+                    usage: Usage::ClientAuth,
                 }],
                 store_root: false,
             },

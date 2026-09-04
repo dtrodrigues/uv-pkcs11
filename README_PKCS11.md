@@ -65,6 +65,12 @@ Notes:
   used.
 - Only the leaf certificate is sent; intermediates must be known to the
   server.
+- A certificate is only considered when it can sign as a TLS client: its
+  `keyUsage`, if present, must include `digitalSignature` (a
+  `keyEncipherment`-only RSA key-exchange certificate is passed over), and
+  its `extendedKeyUsage`, if present, must include `clientAuth`. Selecting
+  such a certificate explicitly reports the reason; `rustls-pkcs11-inspect`
+  lists it next to the certificate.
 
 Known limitations (kept simple on purpose; both surface as TLS handshake
 failures rather than discovery-time errors):

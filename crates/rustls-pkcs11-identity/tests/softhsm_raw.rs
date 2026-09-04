@@ -1,6 +1,6 @@
 mod common;
 
-use common::{KeySpec, TokenSpec};
+use common::{KeySpec, TokenSpec, Usage};
 use rustls_pkcs11_identity::Pkcs11ClientIdentity;
 
 /// A token offering only the raw `CKM_RSA_PKCS` and `CKM_RSA_PKCS_PSS`
@@ -17,6 +17,7 @@ fn raw_mechanisms_complete_handshake() {
             keys: vec![KeySpec {
                 id: 1,
                 with_certificate: true,
+                usage: Usage::ClientAuth,
             }],
             store_root: false,
         }],

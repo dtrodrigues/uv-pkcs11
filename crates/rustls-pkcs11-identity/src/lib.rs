@@ -15,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -32,6 +33,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::sign::{CertifiedKey, Signer, SigningKey, SingleCertAndKey};
 use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 pub mod inspect;
 
@@ -95,12 +97,17 @@ impl Pkcs11ClientIdentity {
 
     /// The exactly-one identity matching `selector`, or an error.
     fn single_identity(pkcs11: &Pkcs11, selector: &Selector) -> Result<Self, Pkcs11IdentityError> {
-        let (identities, found_supported_token) = find_identities(pkcs11, selector)?;
-        if identities.is_empty() && !found_supported_token {
-            return Err(Pkcs11IdentityError::NoSupportedSignatureMechanisms);
+        let discovery = find_identities(pkcs11, selector)?;
+        if discovery.identities.is_empty() {
+            if !discovery.found_supported_token {
+                return Err(Pkcs11IdentityError::NoSupportedSignatureMechanisms);
+            }
+            if let Some(problem) = discovery.unusable_certificates.first() {
+                return Err(Pkcs11IdentityError::UnusableCertificate(*problem));
+            }
         }
         Ok(Self::from_discovered(select_discovered_identity(
-            identities,
+            discovery.identities,
         )?))
     }
 
@@ -167,20 +174,29 @@ struct Selector {
     object: Option<String>,
 }
 
-/// The identities matching `selector` across all initialized tokens, and
-/// whether any token supported the required signature mechanisms at all.
-fn find_identities(
-    pkcs11: &Pkcs11,
-    selector: &Selector,
-) -> Result<(Vec<DiscoveredIdentity>, bool), Pkcs11IdentityError> {
-    let mut identities = Vec::new();
-    let mut found_supported_token = false;
+/// What searching all initialized tokens for identities found.
+struct Discovery {
+    /// The identities matching the selector.
+    identities: Vec<DiscoveredIdentity>,
+    /// Whether any token supported the required signature mechanisms at all.
+    found_supported_token: bool,
+    /// Why certificates that matched the selector and had a signing key were
+    /// nevertheless rejected.
+    unusable_certificates: Vec<ClientCertificateProblem>,
+}
+
+fn find_identities(pkcs11: &Pkcs11, selector: &Selector) -> Result<Discovery, Pkcs11IdentityError> {
+    let mut discovery = Discovery {
+        identities: Vec::new(),
+        found_supported_token: false,
+        unusable_certificates: Vec::new(),
+    };
     for slot in pkcs11.get_slots_with_initialized_token()? {
         let token_mechanisms = pkcs11.get_mechanism_list(slot)?;
         if signing_schemes(&token_mechanisms).is_empty() {
             continue;
         }
-        found_supported_token = true;
+        discovery.found_supported_token = true;
         if selector.token.is_some() || selector.serial.is_some() {
             let info = pkcs11.get_token_info(slot)?;
             if selector
@@ -198,14 +214,9 @@ fn find_identities(
                 continue;
             }
         }
-        identities.extend(discover_on_token(
-            pkcs11,
-            slot,
-            selector,
-            &token_mechanisms,
-        )?);
+        discover_on_token(pkcs11, slot, selector, &token_mechanisms, &mut discovery)?;
     }
-    Ok((identities, found_supported_token))
+    Ok(discovery)
 }
 
 /// The parsed subset of an RFC 7512 `pkcs11:` URI, as described on
@@ -368,12 +379,14 @@ struct TokenCertificate {
     value: Vec<u8>,
 }
 
+/// Add the identities on one token to `discovery`.
 fn discover_on_token(
     pkcs11: &Pkcs11,
     slot: Slot,
     selector: &Selector,
     token_mechanisms: &[MechanismType],
-) -> Result<Vec<DiscoveredIdentity>, Pkcs11IdentityError> {
+    discovery: &mut Discovery,
+) -> Result<(), Pkcs11IdentityError> {
     let session = pkcs11.open_ro_session(slot)?;
     let mut identities = Vec::new();
     for certificate in load_certificates(&session, selector)? {
@@ -398,22 +411,73 @@ fn discover_on_token(
         if supported_schemes.is_empty() {
             continue;
         }
+        if let Some(problem) = client_certificate_problem(&certificate.value) {
+            discovery.unusable_certificates.push(problem);
+            continue;
+        }
 
         identities.push((private_key, supported_schemes, certificate.value));
     }
 
     let session = Arc::new(Mutex::new(session));
-    Ok(identities
-        .into_iter()
-        .map(
-            |(private_key, supported_schemes, certificate)| DiscoveredIdentity {
-                session: session.clone(),
-                private_key,
-                supported_schemes,
-                certificate,
-            },
-        )
-        .collect())
+    discovery.identities.extend(identities.into_iter().map(
+        |(private_key, supported_schemes, certificate)| DiscoveredIdentity {
+            session: session.clone(),
+            private_key,
+            supported_schemes,
+            certificate,
+        },
+    ));
+    Ok(())
+}
+
+/// Why a certificate cannot identify a TLS client, as checked before a
+/// certificate/key pair is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientCertificateProblem {
+    /// The certificate is not valid X.509.
+    Malformed,
+    /// `keyUsage` is present but lacks `digitalSignature`, as on a key
+    /// encipherment (RSA key exchange) certificate.
+    NoDigitalSignature,
+    /// `extendedKeyUsage` is present but lacks `clientAuth`.
+    NoClientAuth,
+}
+
+impl fmt::Display for ClientCertificateProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed => f.write_str("not a valid X.509 certificate"),
+            Self::NoDigitalSignature => f.write_str("keyUsage lacks digitalSignature"),
+            Self::NoClientAuth => f.write_str("extendedKeyUsage lacks clientAuth"),
+        }
+    }
+}
+
+/// Check that a DER certificate can identify a TLS client, which signs the
+/// handshake in a client role: `keyUsage`, when present, must include
+/// `digitalSignature`, and `extendedKeyUsage`, when present, must include
+/// `clientAuth` (or `anyExtendedKeyUsage`). Absent extensions impose no
+/// limits, as in RFC 5280.
+fn client_certificate_problem(der: &[u8]) -> Option<ClientCertificateProblem> {
+    let Ok((_, certificate)) = X509Certificate::from_der(der) else {
+        return Some(ClientCertificateProblem::Malformed);
+    };
+    match certificate.key_usage() {
+        Ok(Some(usage)) if !usage.value.digital_signature() => {
+            return Some(ClientCertificateProblem::NoDigitalSignature);
+        }
+        Ok(_) => {}
+        Err(_) => return Some(ClientCertificateProblem::Malformed),
+    }
+    match certificate.extended_key_usage() {
+        Ok(Some(usage)) if !(usage.value.client_auth || usage.value.any) => {
+            return Some(ClientCertificateProblem::NoClientAuth);
+        }
+        Ok(_) => {}
+        Err(_) => return Some(ClientCertificateProblem::Malformed),
+    }
+    None
 }
 
 fn load_certificates(
@@ -735,6 +799,10 @@ pub enum Pkcs11IdentityError {
     /// No signing-capable key has a unique matching certificate.
     #[error("PKCS#11 tokens have no usable signing identity")]
     NoUsableSigningIdentity,
+    /// Every certificate paired with a signing key cannot identify a TLS
+    /// client.
+    #[error("PKCS#11 certificate cannot identify a TLS client: {0}")]
+    UnusableCertificate(ClientCertificateProblem),
     /// Automatic discovery found more than one usable identity.
     #[error(
         "PKCS#11 tokens hold {0} usable signing identities; select one with a `pkcs11:` URI attribute (`id`, `token`, `object`)"
@@ -881,6 +949,14 @@ mod tests {
                 message
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_unparseable_certificates() {
+        assert_eq!(
+            client_certificate_problem(b"not DER"),
+            Some(ClientCertificateProblem::Malformed)
         );
     }
 

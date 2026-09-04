@@ -6,7 +6,10 @@ use cryptoki::object::{Attribute, AttributeType, CertificateType, KeyType, Objec
 use cryptoki::session::Session;
 use rustls::SignatureScheme;
 
-use crate::{Pkcs11IdentityError, Pkcs11Uri, attribute, load_module, signing_schemes};
+use crate::{
+    ClientCertificateProblem, Pkcs11IdentityError, Pkcs11Uri, attribute,
+    client_certificate_problem, load_module, signing_schemes,
+};
 
 /// Everything relevant to identity detection that a module exposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +42,8 @@ pub struct CertificateReport {
     pub id: Vec<u8>,
     /// `CKA_LABEL`.
     pub label: String,
+    /// Why the certificate cannot identify a TLS client, if it cannot.
+    pub problem: Option<ClientCertificateProblem>,
 }
 
 /// A private key object.
@@ -69,12 +74,12 @@ pub struct Identity<'a> {
 }
 
 impl TokenReport {
-    /// The usable identities on this token: certificates whose non-empty
-    /// `CKA_ID` matches exactly one usable RSA signing key.
+    /// The usable identities on this token: client-capable certificates whose
+    /// non-empty `CKA_ID` matches exactly one usable RSA signing key.
     pub fn identities(&self) -> Vec<Identity<'_>> {
         self.certificates
             .iter()
-            .filter(|certificate| !certificate.id.is_empty())
+            .filter(|certificate| !certificate.id.is_empty() && certificate.problem.is_none())
             .filter(|certificate| {
                 let keys = self
                     .private_keys
@@ -155,11 +160,24 @@ fn certificates(session: &Session) -> Result<Vec<CertificateReport>, Pkcs11Ident
     handles
         .into_iter()
         .map(|handle| {
+            let value = attribute(
+                session,
+                handle,
+                AttributeType::Value,
+                |attribute| match attribute {
+                    Attribute::Value(value) => Some(value),
+                    _ => None,
+                },
+            )?;
             Ok(CertificateReport {
                 id: attribute(session, handle, AttributeType::Id, id_attribute)?
                     .unwrap_or_default(),
                 label: attribute(session, handle, AttributeType::Label, label_attribute)?
                     .unwrap_or_default(),
+                problem: match value {
+                    Some(value) => client_certificate_problem(&value),
+                    None => Some(ClientCertificateProblem::Malformed),
+                },
             })
         })
         .collect()
@@ -240,6 +258,7 @@ mod tests {
                 .map(|(id, label)| CertificateReport {
                     id: id.to_vec(),
                     label: (*label).to_string(),
+                    problem: None,
                 })
                 .collect(),
             private_keys: keys

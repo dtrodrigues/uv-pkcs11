@@ -1,6 +1,6 @@
 mod common;
 
-use common::{KeySpec, TokenSpec};
+use common::{KeySpec, TokenSpec, Usage};
 use rustls_pkcs11_identity::Pkcs11ClientIdentity;
 
 /// A token whose only signing mechanism is the raw `CKM_RSA_PKCS` can
@@ -16,6 +16,7 @@ fn pkcs1_only_token_needs_tls12() {
             keys: vec![KeySpec {
                 id: 1,
                 with_certificate: true,
+                usage: Usage::ClientAuth,
             }],
             store_root: false,
         }],

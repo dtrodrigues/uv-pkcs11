@@ -1,6 +1,6 @@
 mod common;
 
-use common::{KeySpec, TokenSpec};
+use common::{KeySpec, TokenSpec, Usage};
 use rustls_pkcs11_identity::{Pkcs11ClientIdentity, Pkcs11IdentityError};
 
 /// `pkcs11:` URI attributes select identities the same way the loader does.
@@ -14,6 +14,7 @@ fn uri_attributes_select_identities() {
                 keys: vec![KeySpec {
                     id: 1,
                     with_certificate: true,
+                    usage: Usage::ClientAuth,
                 }],
                 store_root: false,
             },
@@ -22,6 +23,7 @@ fn uri_attributes_select_identities() {
                 keys: vec![KeySpec {
                     id: 2,
                     with_certificate: true,
+                    usage: Usage::ClientAuth,
                 }],
                 store_root: false,
             },

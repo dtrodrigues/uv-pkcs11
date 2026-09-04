@@ -127,8 +127,12 @@ fn print_token(token: &TokenReport) {
     }
     println!("  Certificates: {}", token.certificates.len());
     for certificate in &token.certificates {
+        let status = match certificate.problem {
+            Some(problem) => format!("  {problem}"),
+            None => String::new(),
+        };
         println!(
-            "    CKA_ID {:<12} label `{}`",
+            "    CKA_ID {:<12} label `{}`{status}",
             hex(&certificate.id),
             certificate.label
         );

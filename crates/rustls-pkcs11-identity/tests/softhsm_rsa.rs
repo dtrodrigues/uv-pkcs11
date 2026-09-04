@@ -1,6 +1,6 @@
 mod common;
 
-use common::{KeySpec, TokenSpec};
+use common::{KeySpec, TokenSpec, Usage};
 use rustls_pkcs11_identity::Pkcs11ClientIdentity;
 
 /// An RSA identity is detected across tokens (one of which is empty), loaded
@@ -20,6 +20,7 @@ fn rsa_identity_completes_handshake() {
                 keys: vec![KeySpec {
                     id: 1,
                     with_certificate: true,
+                    usage: Usage::ClientAuth,
                 }],
                 store_root: true,
             },

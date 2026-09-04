@@ -54,6 +54,30 @@ pub struct KeySpec {
     pub id: u8,
     /// Whether to store the key's certificate (under the same `CKA_ID`).
     pub with_certificate: bool,
+    /// The key usage the certificate is issued with.
+    pub usage: Usage,
+}
+
+/// The `keyUsage`/`extendedKeyUsage` a certificate is issued with.
+#[derive(Clone, Copy)]
+pub enum Usage {
+    /// `digitalSignature` with `clientAuth`: a TLS client certificate.
+    ClientAuth,
+    /// `keyEncipherment` with `clientAuth`: an RSA key-exchange certificate
+    /// that cannot sign.
+    KeyEncipherment,
+    /// `digitalSignature` with `serverAuth` only.
+    ServerAuth,
+}
+
+impl Usage {
+    fn extensions(self) -> &'static str {
+        match self {
+            Self::ClientAuth => CLIENT_EXTENSIONS,
+            Self::KeyEncipherment => KEY_ENCIPHERMENT_EXTENSIONS,
+            Self::ServerAuth => SERVER_ONLY_EXTENSIONS,
+        }
+    }
 }
 
 pub struct TokenSpec<'a> {
@@ -184,7 +208,13 @@ fn populate_token(pkcs11: &Pkcs11, dir: &Path, pki: &Pki, spec: &TokenSpec<'_>) 
             Some(Attribute::Modulus(modulus)) => modulus,
             other => panic!("unexpected attribute {other:?}"),
         };
-        let certificate = issue_for_public_key(dir, &name, &rsa_spki(&modulus), &pki.root);
+        let certificate = issue_for_public_key(
+            dir,
+            &name,
+            &rsa_spki(&modulus),
+            &pki.root,
+            key.usage.extensions(),
+        );
         if key.with_certificate {
             certificates.push((certificate, vec![key.id]));
         }
@@ -291,7 +321,13 @@ fn rsa_spki(modulus: &[u8]) -> Vec<u8> {
 
 /// Issue a client certificate for a public key we hold no private key for:
 /// a throwaway key signs the request and `-force_pubkey` swaps in the token's.
-fn issue_for_public_key(dir: &Path, name: &str, spki: &[u8], issuer: &Material) -> Vec<u8> {
+fn issue_for_public_key(
+    dir: &Path,
+    name: &str,
+    spki: &[u8],
+    issuer: &Material,
+    extensions: &str,
+) -> Vec<u8> {
     let spki_path = dir.join(format!("{name}.spki.der"));
     std::fs::write(&spki_path, spki).unwrap();
     let pubkey_pem = dir.join(format!("{name}.pub"));
@@ -310,7 +346,7 @@ fn issue_for_public_key(dir: &Path, name: &str, spki: &[u8], issuer: &Material) 
     let ext = dir.join(format!("{name}.ext"));
     let pem = dir.join(format!("{name}.pem"));
     let der_path = dir.join(format!("{name}.der"));
-    std::fs::write(&ext, CLIENT_EXTENSIONS).unwrap();
+    std::fs::write(&ext, extensions).unwrap();
     openssl(&[
         "req",
         "-new",
@@ -520,6 +556,10 @@ fn sign_request(dir: &Path, name: &str, key: &Path, issuer: Option<&Material>, e
 const CA_EXTENSIONS: &str = "[req]\ndistinguished_name=dn\n[dn]\n[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n";
 const CLIENT_EXTENSIONS: &str =
     "[v3]\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=clientAuth\n";
+const KEY_ENCIPHERMENT_EXTENSIONS: &str =
+    "[v3]\nbasicConstraints=CA:FALSE\nkeyUsage=keyEncipherment\nextendedKeyUsage=clientAuth\n";
+const SERVER_ONLY_EXTENSIONS: &str =
+    "[v3]\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth\n";
 const SERVER_EXTENSIONS: &str = "[req]\ndistinguished_name=dn\n[dn]\n[v3]\nbasicConstraints=CA:FALSE\nsubjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n";
 
 fn make_ca(dir: &Path, name: &str, issuer: Option<&Material>) -> Material {
