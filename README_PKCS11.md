@@ -56,6 +56,13 @@ Notes:
 - RSA only (PKCS#1 v1.5 and PSS with SHA-256/384/512); the identity applies
   only to verified HTTPS connections, never to hosts marked
   `--allow-insecure-host`.
+- Hash-and-sign mechanisms (`CKM_SHA*_RSA_PKCS`, `CKM_SHA*_RSA_PKCS_PSS`)
+  are preferred; providers that only expose the raw `CKM_RSA_PKCS` and
+  `CKM_RSA_PKCS_PSS` mechanisms work too, with the handshake transcript
+  hashed by uv and the token padding and signing the digest. A provider
+  without `CKM_RSA_PKCS_PSS` can only authenticate over TLS 1.2, since
+  TLS 1.3 requires RSA-PSS for client certificates. `CKM_RSA_X_509` is not
+  used.
 - Only the leaf certificate is sent; intermediates must be known to the
   server.
 
@@ -69,10 +76,12 @@ failures rather than discovery-time errors):
   so certificate and key match.
 - Signature schemes are offered based on `C_GetMechanismList` alone:
   per-mechanism `CKF_SIGN` flags and key-size ranges from
-  `C_GetMechanismInfo` are not checked, so a token that lists an RSA
+  `C_GetMechanismInfo` are not checked, and a key's
+  `CKA_ALLOWED_MECHANISMS` is not read (the cryptoki crate decodes that
+  attribute with an out-of-bounds read), so a token that lists an RSA
   mechanism it cannot use with the selected key (for example a key outside
-  the mechanism's supported size range) fails in `C_Sign` during the
-  handshake.
+  the mechanism's supported size range, or one restricted to other
+  mechanisms) fails in `C_Sign` during the handshake.
 
 ## Installation
 

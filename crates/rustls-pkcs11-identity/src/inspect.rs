@@ -6,9 +6,7 @@ use cryptoki::object::{Attribute, AttributeType, CertificateType, KeyType, Objec
 use cryptoki::session::Session;
 use rustls::SignatureScheme;
 
-use crate::{
-    Pkcs11IdentityError, Pkcs11Uri, attribute, key_allowed_mechanisms, load_module, signing_schemes,
-};
+use crate::{Pkcs11IdentityError, Pkcs11Uri, attribute, load_module, signing_schemes};
 
 /// Everything relevant to identity detection that a module exposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +105,7 @@ impl Inspection {
                 slot: slot.id(),
                 label: info.label().to_string(),
                 serial: info.serial_number().to_string(),
-                supported_schemes: signing_schemes(&mechanisms, None),
+                supported_schemes: signing_schemes(&mechanisms),
                 certificates: certificates(&session)?,
                 private_keys: private_keys(&session, &mechanisms)?,
             });
@@ -196,8 +194,7 @@ fn private_keys(
             )?
             .unwrap_or(false);
             let schemes = if rsa && sign {
-                let allowed = key_allowed_mechanisms(session, handle)?;
-                signing_schemes(mechanisms, allowed.as_deref())
+                signing_schemes(mechanisms)
             } else {
                 Vec::new()
             };

@@ -26,7 +26,10 @@ use cryptoki::session::UserType;
 use cryptoki::types::AuthPin;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
+use rustls::{
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection,
+    SupportedProtocolVersion,
+};
 use rustls_pkcs11_identity::Pkcs11ClientIdentity;
 
 const PIN: &str = "1234";
@@ -67,6 +70,16 @@ pub struct Fixture {
 
 /// Provision a scratch SoftHSM configuration, or `None` to skip the test.
 pub fn provision(name: &str, tokens: &[TokenSpec<'_>]) -> Option<Fixture> {
+    provision_with_mechanisms(name, "ALL", tokens)
+}
+
+/// [`provision`] with SoftHSM's `slots.mechanisms` setting, which edits what
+/// `C_GetMechanismList` reports (`ALL`, or `-CKM_X,CKM_Y` to hide some).
+pub fn provision_with_mechanisms(
+    name: &str,
+    mechanisms: &str,
+    tokens: &[TokenSpec<'_>],
+) -> Option<Fixture> {
     let Some(module) = find_module() else {
         eprintln!("skipping: SoftHSM module not found");
         return None;
@@ -86,7 +99,7 @@ pub fn provision(name: &str, tokens: &[TokenSpec<'_>]) -> Option<Fixture> {
     std::fs::write(
         &conf,
         format!(
-            "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\n",
+            "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\nslots.mechanisms = {mechanisms}\n",
             token_dir.display()
         ),
     )
@@ -519,6 +532,16 @@ fn make_ca(dir: &Path, name: &str, issuer: Option<&Material>) -> Material {
 /// server that trusts the PKI root, and return the number of certificates
 /// the server received from the client.
 pub fn handshake(fixture: &Fixture, identity: &Pkcs11ClientIdentity) -> usize {
+    try_handshake(fixture, identity, rustls::DEFAULT_VERSIONS).unwrap()
+}
+
+/// [`handshake`] with the client limited to `versions`, returning the error
+/// of whichever side failed first instead of panicking.
+pub fn try_handshake(
+    fixture: &Fixture,
+    identity: &Pkcs11ClientIdentity,
+    versions: &[&'static SupportedProtocolVersion],
+) -> Result<usize, String> {
     let mut client_roots = RootCertStore::empty();
     client_roots
         .add(CertificateDer::from(fixture.pki.root.certificate.clone()))
@@ -536,26 +559,33 @@ pub fn handshake(fixture: &Fixture, identity: &Pkcs11ClientIdentity) -> usize {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    let server = std::thread::spawn(move || {
+    let server = std::thread::spawn(move || -> Result<usize, String> {
         let (mut tcp, _) = listener.accept().unwrap();
         let mut connection = ServerConnection::new(Arc::new(server_config)).unwrap();
         let mut stream = rustls::Stream::new(&mut connection, &mut tcp);
         let mut request = String::new();
-        BufReader::new(&mut stream).read_line(&mut request).unwrap();
+        BufReader::new(&mut stream)
+            .read_line(&mut request)
+            .map_err(|error| format!("server: {error}"))?;
         assert_eq!(request, "ping\n");
-        stream.write_all(b"pong\n").unwrap();
+        stream
+            .write_all(b"pong\n")
+            .map_err(|error| format!("server: {error}"))?;
         stream.conn.send_close_notify();
-        stream.conn.complete_io(stream.sock).unwrap();
-        connection
+        stream
+            .conn
+            .complete_io(stream.sock)
+            .map_err(|error| format!("server: {error}"))?;
+        Ok(connection
             .peer_certificates()
-            .map_or(0, |certs| certs.len())
+            .map_or(0, |certs| certs.len()))
     });
 
     let mut server_roots = RootCertStore::empty();
     server_roots
         .add(CertificateDer::from(fixture.pki.server.certificate.clone()))
         .unwrap();
-    let client_config = ClientConfig::builder()
+    let client_config = ClientConfig::builder_with_protocol_versions(versions)
         .with_root_certificates(server_roots)
         .with_client_cert_resolver(identity.resolver());
     let mut connection = ClientConnection::new(
@@ -565,10 +595,16 @@ pub fn handshake(fixture: &Fixture, identity: &Pkcs11ClientIdentity) -> usize {
     .unwrap();
     let mut tcp = TcpStream::connect(address).unwrap();
     let mut stream = rustls::Stream::new(&mut connection, &mut tcp);
-    stream.write_all(b"ping\n").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    assert_eq!(response, "pong\n");
+    let client = stream
+        .write_all(b"ping\n")
+        .and_then(|()| {
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            assert_eq!(response, "pong\n");
+            Ok(())
+        })
+        .map_err(|error| format!("client: {error}"));
 
-    server.join().unwrap()
+    let received = server.join().unwrap();
+    client.and(received)
 }

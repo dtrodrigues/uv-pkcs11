@@ -13,6 +13,7 @@
 //! for the duration of a round trip. Async runtimes that drive many
 //! connections on a small worker pool should account for this.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -30,6 +31,7 @@ use rustls::client::ResolvesClientCert;
 use rustls::pki_types::CertificateDer;
 use rustls::sign::{CertifiedKey, Signer, SigningKey, SingleCertAndKey};
 use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 pub mod inspect;
 
@@ -175,7 +177,7 @@ fn find_identities(
     let mut found_supported_token = false;
     for slot in pkcs11.get_slots_with_initialized_token()? {
         let token_mechanisms = pkcs11.get_mechanism_list(slot)?;
-        if signing_schemes(&token_mechanisms, None).is_empty() {
+        if signing_schemes(&token_mechanisms).is_empty() {
             continue;
         }
         found_supported_token = true;
@@ -357,7 +359,7 @@ fn invalid_uri(message: impl Into<String>) -> Pkcs11IdentityError {
 struct DiscoveredIdentity {
     session: Arc<Mutex<Session>>,
     private_key: ObjectHandle,
-    supported_schemes: Vec<SignatureScheme>,
+    supported_schemes: Vec<(SignatureScheme, SigningMethod)>,
     certificate: Vec<u8>,
 }
 
@@ -392,8 +394,7 @@ fn discover_on_token(
             _ => return Err(Pkcs11IdentityError::MultipleObjects("private key")),
         };
 
-        let allowed = key_allowed_mechanisms(&session, private_key)?;
-        let supported_schemes = signing_schemes(token_mechanisms, allowed.as_deref());
+        let supported_schemes = signing_methods(token_mechanisms);
         if supported_schemes.is_empty() {
             continue;
         }
@@ -468,27 +469,11 @@ fn attribute<T>(
         .find_map(extract))
 }
 
-/// A key's non-empty `CKA_ALLOWED_MECHANISMS`, when present.
-fn key_allowed_mechanisms(
-    session: &Session,
-    private_key: ObjectHandle,
-) -> Result<Option<Vec<MechanismType>>, Pkcs11IdentityError> {
-    attribute(
-        session,
-        private_key,
-        AttributeType::AllowedMechanisms,
-        |attribute| match attribute {
-            Attribute::AllowedMechanisms(mechanisms) if !mechanisms.is_empty() => Some(mechanisms),
-            _ => None,
-        },
-    )
-}
-
 #[derive(Debug)]
 struct Pkcs11SigningKey {
     session: Arc<Mutex<Session>>,
     private_key: ObjectHandle,
-    supported_schemes: Vec<SignatureScheme>,
+    supported_schemes: Vec<(SignatureScheme, SigningMethod)>,
 }
 
 impl SigningKey for Pkcs11SigningKey {
@@ -496,12 +481,13 @@ impl SigningKey for Pkcs11SigningKey {
         self.supported_schemes
             .iter()
             .copied()
-            .find(|scheme| offered.contains(scheme))
-            .map(|scheme| {
+            .find(|(scheme, _)| offered.contains(scheme))
+            .map(|(scheme, method)| {
                 Box::new(Pkcs11Signer {
                     session: self.session.clone(),
                     private_key: self.private_key,
                     scheme,
+                    method,
                 }) as Box<dyn Signer>
             })
     }
@@ -516,20 +502,23 @@ struct Pkcs11Signer {
     session: Arc<Mutex<Session>>,
     private_key: ObjectHandle,
     scheme: SignatureScheme,
+    method: SigningMethod,
 }
 
 impl Signer for Pkcs11Signer {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, RustlsError> {
-        let mechanism = mechanism_for_scheme(self.scheme).ok_or_else(|| {
+        let unsupported = || {
             RustlsError::General(format!(
                 "unsupported PKCS#11 signature scheme: {:?}",
                 self.scheme
             ))
-        })?;
+        };
+        let mechanism = mechanism_for(self.scheme, self.method).ok_or_else(unsupported)?;
+        let input = signing_input(self.scheme, self.method, message).ok_or_else(unsupported)?;
         self.session
             .lock()
             .map_err(|_| RustlsError::General("PKCS#11 session lock is poisoned".to_string()))?
-            .sign(&mechanism, self.private_key, message)
+            .sign(&mechanism, self.private_key, &input)
             .map_err(|err| RustlsError::General(format!("PKCS#11 signing failed: {err}")))
     }
 
@@ -538,75 +527,203 @@ impl Signer for Pkcs11Signer {
     }
 }
 
+/// How a TLS signature scheme is produced on a token, in preference order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SigningMethod {
+    /// The token hashes and signs the handshake transcript
+    /// (`CKM_SHA*_RSA_PKCS` and `CKM_SHA*_RSA_PKCS_PSS`).
+    HashOnToken,
+    /// The transcript is hashed here and the token pads and signs the digest
+    /// (`CKM_RSA_PKCS` and `CKM_RSA_PKCS_PSS`), for providers that only
+    /// expose the raw RSA mechanisms.
+    HashInProcess,
+}
+
+impl SigningMethod {
+    const PREFERENCE: [Self; 2] = [Self::HashOnToken, Self::HashInProcess];
+}
+
+/// A TLS signature scheme and the PKCS#11 mechanisms that produce it.
+struct SchemeMechanisms {
+    scheme: SignatureScheme,
+    /// The hash-and-sign mechanism ([`SigningMethod::HashOnToken`]).
+    hashed: MechanismType,
+    /// The mechanism that signs a digest ([`SigningMethod::HashInProcess`]).
+    raw: MechanismType,
+}
+
+impl SchemeMechanisms {
+    fn mechanism(&self, method: SigningMethod) -> MechanismType {
+        match method {
+            SigningMethod::HashOnToken => self.hashed,
+            SigningMethod::HashInProcess => self.raw,
+        }
+    }
+}
+
 /// TLS signature schemes and their PKCS#11 mechanisms, in preference order.
-const SCHEME_MECHANISMS: [(MechanismType, SignatureScheme); 6] = [
-    (
-        MechanismType::SHA512_RSA_PKCS_PSS,
-        SignatureScheme::RSA_PSS_SHA512,
-    ),
-    (
-        MechanismType::SHA384_RSA_PKCS_PSS,
-        SignatureScheme::RSA_PSS_SHA384,
-    ),
-    (
-        MechanismType::SHA256_RSA_PKCS_PSS,
-        SignatureScheme::RSA_PSS_SHA256,
-    ),
-    (
-        MechanismType::SHA512_RSA_PKCS,
-        SignatureScheme::RSA_PKCS1_SHA512,
-    ),
-    (
-        MechanismType::SHA384_RSA_PKCS,
-        SignatureScheme::RSA_PKCS1_SHA384,
-    ),
-    (
-        MechanismType::SHA256_RSA_PKCS,
-        SignatureScheme::RSA_PKCS1_SHA256,
-    ),
+const SCHEME_MECHANISMS: [SchemeMechanisms; 6] = [
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PSS_SHA512,
+        hashed: MechanismType::SHA512_RSA_PKCS_PSS,
+        raw: MechanismType::RSA_PKCS_PSS,
+    },
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PSS_SHA384,
+        hashed: MechanismType::SHA384_RSA_PKCS_PSS,
+        raw: MechanismType::RSA_PKCS_PSS,
+    },
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PSS_SHA256,
+        hashed: MechanismType::SHA256_RSA_PKCS_PSS,
+        raw: MechanismType::RSA_PKCS_PSS,
+    },
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PKCS1_SHA512,
+        hashed: MechanismType::SHA512_RSA_PKCS,
+        raw: MechanismType::RSA_PKCS,
+    },
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PKCS1_SHA384,
+        hashed: MechanismType::SHA384_RSA_PKCS,
+        raw: MechanismType::RSA_PKCS,
+    },
+    SchemeMechanisms {
+        scheme: SignatureScheme::RSA_PKCS1_SHA256,
+        hashed: MechanismType::SHA256_RSA_PKCS,
+        raw: MechanismType::RSA_PKCS,
+    },
 ];
 
-/// The TLS signature schemes producible through `token_mechanisms`, honouring
-/// an optional `CKA_ALLOWED_MECHANISMS` restriction, in preference order.
-fn signing_schemes(
-    token_mechanisms: &[MechanismType],
-    allowed_mechanisms: Option<&[MechanismType]>,
-) -> Vec<SignatureScheme> {
+/// The TLS signature schemes producible through `token_mechanisms`, each
+/// with the preferred [`SigningMethod`] the token supports for it, in
+/// preference order.
+///
+/// Per-key `CKA_ALLOWED_MECHANISMS` restrictions are not consulted: cryptoki
+/// 0.12 decodes that attribute with its byte length as the element count and
+/// reads past the buffer, so a key carrying it fails in `C_Sign` instead.
+fn signing_methods(token_mechanisms: &[MechanismType]) -> Vec<(SignatureScheme, SigningMethod)> {
     SCHEME_MECHANISMS
-        .into_iter()
-        .filter(|(mechanism, _)| token_mechanisms.contains(mechanism))
-        .filter(|(mechanism, _)| {
-            allowed_mechanisms.is_none_or(|allowed| allowed.contains(mechanism))
+        .iter()
+        .filter_map(|entry| {
+            SigningMethod::PREFERENCE
+                .into_iter()
+                .find(|method| token_mechanisms.contains(&entry.mechanism(*method)))
+                .map(|method| (entry.scheme, method))
         })
-        .map(|(_, scheme)| scheme)
         .collect()
 }
 
-/// The PKCS#11 mechanism for a TLS signature scheme. All of these hash on
-/// the token, so the handshake transcript is passed through unmodified.
-fn mechanism_for_scheme(scheme: SignatureScheme) -> Option<Mechanism<'static>> {
-    let mechanism = match scheme {
-        SignatureScheme::RSA_PSS_SHA256 => Mechanism::Sha256RsaPkcsPss(PkcsPssParams {
+/// The TLS signature schemes producible through `token_mechanisms`, as
+/// [`signing_methods`] without the method.
+fn signing_schemes(token_mechanisms: &[MechanismType]) -> Vec<SignatureScheme> {
+    signing_methods(token_mechanisms)
+        .into_iter()
+        .map(|(scheme, _)| scheme)
+        .collect()
+}
+
+/// The PSS parameters of an RSA-PSS scheme.
+fn pss_params(scheme: SignatureScheme) -> Option<PkcsPssParams> {
+    let params = match scheme {
+        SignatureScheme::RSA_PSS_SHA256 => PkcsPssParams {
             hash_alg: MechanismType::SHA256,
             mgf: PkcsMgfType::MGF1_SHA256,
             s_len: 32.into(),
-        }),
-        SignatureScheme::RSA_PSS_SHA384 => Mechanism::Sha384RsaPkcsPss(PkcsPssParams {
+        },
+        SignatureScheme::RSA_PSS_SHA384 => PkcsPssParams {
             hash_alg: MechanismType::SHA384,
             mgf: PkcsMgfType::MGF1_SHA384,
             s_len: 48.into(),
-        }),
-        SignatureScheme::RSA_PSS_SHA512 => Mechanism::Sha512RsaPkcsPss(PkcsPssParams {
+        },
+        SignatureScheme::RSA_PSS_SHA512 => PkcsPssParams {
             hash_alg: MechanismType::SHA512,
             mgf: PkcsMgfType::MGF1_SHA512,
             s_len: 64.into(),
-        }),
-        SignatureScheme::RSA_PKCS1_SHA256 => Mechanism::Sha256RsaPkcs,
-        SignatureScheme::RSA_PKCS1_SHA384 => Mechanism::Sha384RsaPkcs,
-        SignatureScheme::RSA_PKCS1_SHA512 => Mechanism::Sha512RsaPkcs,
+        },
+        _ => return None,
+    };
+    Some(params)
+}
+
+/// The PKCS#11 mechanism that produces `scheme` by `method`.
+fn mechanism_for(scheme: SignatureScheme, method: SigningMethod) -> Option<Mechanism<'static>> {
+    let mechanism = match (scheme, method) {
+        (SignatureScheme::RSA_PSS_SHA256, SigningMethod::HashOnToken) => {
+            Mechanism::Sha256RsaPkcsPss(pss_params(scheme)?)
+        }
+        (SignatureScheme::RSA_PSS_SHA384, SigningMethod::HashOnToken) => {
+            Mechanism::Sha384RsaPkcsPss(pss_params(scheme)?)
+        }
+        (SignatureScheme::RSA_PSS_SHA512, SigningMethod::HashOnToken) => {
+            Mechanism::Sha512RsaPkcsPss(pss_params(scheme)?)
+        }
+        (
+            SignatureScheme::RSA_PSS_SHA256
+            | SignatureScheme::RSA_PSS_SHA384
+            | SignatureScheme::RSA_PSS_SHA512,
+            SigningMethod::HashInProcess,
+        ) => Mechanism::RsaPkcsPss(pss_params(scheme)?),
+        (SignatureScheme::RSA_PKCS1_SHA256, SigningMethod::HashOnToken) => Mechanism::Sha256RsaPkcs,
+        (SignatureScheme::RSA_PKCS1_SHA384, SigningMethod::HashOnToken) => Mechanism::Sha384RsaPkcs,
+        (SignatureScheme::RSA_PKCS1_SHA512, SigningMethod::HashOnToken) => Mechanism::Sha512RsaPkcs,
+        (
+            SignatureScheme::RSA_PKCS1_SHA256
+            | SignatureScheme::RSA_PKCS1_SHA384
+            | SignatureScheme::RSA_PKCS1_SHA512,
+            SigningMethod::HashInProcess,
+        ) => Mechanism::RsaPkcs,
         _ => return None,
     };
     Some(mechanism)
+}
+
+/// The `DigestInfo` prefixes that PKCS#1 v1.5 signatures place before the
+/// digest (RFC 8017, section 9.2, note 1), which `CKM_RSA_PKCS` expects the
+/// caller to supply.
+const DIGEST_INFO_SHA256: &[u8] = &[
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
+];
+const DIGEST_INFO_SHA384: &[u8] = &[
+    0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05,
+    0x00, 0x04, 0x30,
+];
+const DIGEST_INFO_SHA512: &[u8] = &[
+    0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05,
+    0x00, 0x04, 0x40,
+];
+
+/// The data passed to `C_Sign` for `message`: the message itself when the
+/// token hashes, otherwise its digest, wrapped in a `DigestInfo` for the
+/// PKCS#1 v1.5 schemes (`CKM_RSA_PKCS_PSS` takes the bare digest and learns
+/// the hash from its parameters).
+fn signing_input<'a>(
+    scheme: SignatureScheme,
+    method: SigningMethod,
+    message: &'a [u8],
+) -> Option<Cow<'a, [u8]>> {
+    match method {
+        SigningMethod::HashOnToken => Some(Cow::Borrowed(message)),
+        SigningMethod::HashInProcess => {
+            let input = match scheme {
+                SignatureScheme::RSA_PSS_SHA256 => Sha256::digest(message).to_vec(),
+                SignatureScheme::RSA_PSS_SHA384 => Sha384::digest(message).to_vec(),
+                SignatureScheme::RSA_PSS_SHA512 => Sha512::digest(message).to_vec(),
+                SignatureScheme::RSA_PKCS1_SHA256 => {
+                    [DIGEST_INFO_SHA256, &Sha256::digest(message)].concat()
+                }
+                SignatureScheme::RSA_PKCS1_SHA384 => {
+                    [DIGEST_INFO_SHA384, &Sha384::digest(message)].concat()
+                }
+                SignatureScheme::RSA_PKCS1_SHA512 => {
+                    [DIGEST_INFO_SHA512, &Sha512::digest(message)].concat()
+                }
+                _ => return None,
+            };
+            Some(Cow::Owned(input))
+        }
+    }
 }
 
 /// Errors produced while loading a PKCS#11 client identity.
@@ -654,16 +771,116 @@ mod tests {
             MechanismType::SHA256_RSA_PKCS,
         ];
         assert_eq!(
-            signing_schemes(&token_mechanisms, None),
+            signing_methods(&token_mechanisms),
             vec![
-                SignatureScheme::RSA_PSS_SHA256,
-                SignatureScheme::RSA_PKCS1_SHA256,
+                (SignatureScheme::RSA_PSS_SHA256, SigningMethod::HashOnToken),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SigningMethod::HashOnToken
+                ),
             ]
         );
-        // `CKA_ALLOWED_MECHANISMS` restricts further.
         assert_eq!(
-            signing_schemes(&token_mechanisms, Some(&[MechanismType::SHA256_RSA_PKCS])),
+            signing_schemes(&[MechanismType::SHA256_RSA_PKCS]),
             vec![SignatureScheme::RSA_PKCS1_SHA256]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_raw_mechanisms() {
+        // A sign-only token offers every scheme, hashed in process.
+        let raw_only = [MechanismType::RSA_PKCS_PSS, MechanismType::RSA_PKCS];
+        assert_eq!(
+            signing_methods(&raw_only),
+            vec![
+                (
+                    SignatureScheme::RSA_PSS_SHA512,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PSS_SHA384,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA512,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA384,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SigningMethod::HashInProcess
+                ),
+            ]
+        );
+        // Hashing on the token is preferred where available, per scheme.
+        let mixed = [MechanismType::SHA256_RSA_PKCS, MechanismType::RSA_PKCS];
+        assert_eq!(
+            signing_methods(&mixed),
+            vec![
+                (
+                    SignatureScheme::RSA_PKCS1_SHA512,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA384,
+                    SigningMethod::HashInProcess
+                ),
+                (
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SigningMethod::HashOnToken
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn hashes_in_process_for_raw_mechanisms() {
+        let message = b"handshake transcript";
+        assert_eq!(
+            signing_input(
+                SignatureScheme::RSA_PSS_SHA256,
+                SigningMethod::HashOnToken,
+                message
+            )
+            .as_deref(),
+            Some(&message[..])
+        );
+        assert_eq!(
+            signing_input(
+                SignatureScheme::RSA_PSS_SHA384,
+                SigningMethod::HashInProcess,
+                message
+            )
+            .as_deref(),
+            Some(&Sha384::digest(message)[..])
+        );
+        // PKCS#1 v1.5 wraps the digest in a `DigestInfo`.
+        let input = signing_input(
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SigningMethod::HashInProcess,
+            message,
+        )
+        .unwrap();
+        assert_eq!(&input[..DIGEST_INFO_SHA256.len()], DIGEST_INFO_SHA256);
+        assert_eq!(
+            &input[DIGEST_INFO_SHA256.len()..],
+            &Sha256::digest(message)[..]
+        );
+        assert_eq!(input.len(), 0x33);
+        assert!(
+            signing_input(
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SigningMethod::HashInProcess,
+                message
+            )
+            .is_none()
         );
     }
 
@@ -738,9 +955,29 @@ mod tests {
     #[test]
     fn maps_schemes_to_mechanisms() {
         assert!(matches!(
-            mechanism_for_scheme(SignatureScheme::RSA_PSS_SHA256),
+            mechanism_for(SignatureScheme::RSA_PSS_SHA256, SigningMethod::HashOnToken),
             Some(Mechanism::Sha256RsaPkcsPss(_))
         ));
-        assert!(mechanism_for_scheme(SignatureScheme::ECDSA_NISTP256_SHA256).is_none());
+        assert!(matches!(
+            mechanism_for(
+                SignatureScheme::RSA_PSS_SHA256,
+                SigningMethod::HashInProcess
+            ),
+            Some(Mechanism::RsaPkcsPss(_))
+        ));
+        assert!(matches!(
+            mechanism_for(
+                SignatureScheme::RSA_PKCS1_SHA512,
+                SigningMethod::HashInProcess
+            ),
+            Some(Mechanism::RsaPkcs)
+        ));
+        assert!(
+            mechanism_for(
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SigningMethod::HashOnToken
+            )
+            .is_none()
+        );
     }
 }
