@@ -1735,7 +1735,7 @@ wheels = [
 
 [[package]]
 name = "uv-pkcs11"
-version = "0.12.9"
+version = "0.12.9.1"
 source = { editable = "." }
 
 [package.dev-dependencies]

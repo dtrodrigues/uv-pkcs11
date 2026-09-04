@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "uv-pkcs11"
-version = "0.12.9"
+version = "0.12.9.1"
 description = "uv with PKCS#11 client-certificate (mTLS) support. Unofficial fork of astral-sh/uv."
 authors = [{ name = "Dustin Rodrigues", email = "dust.rod@gmail.com" }]
 requires-python = ">=3.8"
