@@ -667,6 +667,12 @@ impl EnvVars {
     #[attr_added_in("0.1.11")]
     pub const UV_LAST_TAG_DISTANCE: &'static str = "UV_LAST_TAG_DISTANCE";
 
+    /// Used to set the uv-pkcs11 distribution version (from `pyproject.toml`) at build time via
+    /// `build.rs`.
+    #[attr_hidden]
+    #[attr_added_in("0.12.9")]
+    pub const UV_PKCS11_VERSION: &'static str = "UV_PKCS11_VERSION";
+
     /// Used to set the spawning/parent interpreter when using --system in the test suite.
     #[attr_hidden]
     #[attr_added_in("0.2.0")]
