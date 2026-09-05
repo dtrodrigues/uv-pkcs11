@@ -18,9 +18,38 @@ fn main() {
         .to_path_buf();
 
     commit_info(&workspace_root);
+    fork_version(&workspace_root);
 
     let target = std::env::var(EnvVars::TARGET).unwrap();
     println!("cargo:rustc-env=RUST_HOST_TARGET={target}");
+}
+
+/// Expose the uv-pkcs11 distribution version from the root `pyproject.toml`,
+/// which can carry a fourth component (`0.12.9.1`) for fork re-releases that
+/// the semver crate version cannot.
+fn fork_version(workspace_root: &Path) {
+    let pyproject = workspace_root.join("pyproject.toml");
+    println!("cargo:rerun-if-changed={}", pyproject.display());
+    let Ok(contents) = fs::read_to_string(&pyproject) else {
+        return;
+    };
+    let mut in_project = false;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_project = line == "[project]";
+            continue;
+        }
+        if in_project
+            && let Some(value) = line.strip_prefix("version")
+            && let Some(value) = value.trim_start().strip_prefix('=')
+            && let Some(version) = value.trim().trim_end_matches(',').strip_prefix('"')
+            && let Some(version) = version.strip_suffix('"')
+        {
+            println!("cargo:rustc-env={}={version}", EnvVars::UV_PKCS11_VERSION);
+            return;
+        }
+    }
 }
 
 fn commit_info(workspace_root: &Path) {
