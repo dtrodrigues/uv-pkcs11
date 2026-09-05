@@ -3,18 +3,18 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "uv"
+name = "uv-pkcs11"
 version = "0.12.10"
-description = "An extremely fast Python package and project manager, written in Rust."
-authors = [{ name = "Astral Software Inc.", email = "hey@astral.sh" }]
+description = "uv with PKCS#11 client-certificate (mTLS) support. Unofficial fork of astral-sh/uv."
+authors = [{ name = "Dustin Rodrigues", email = "dust.rod@gmail.com" }]
 requires-python = ">=3.8"
 keywords = [
-  "uv", "requirements", "packaging"
+  "uv", "requirements", "packaging", "pkcs11", "mtls"
 ]
 license="MIT OR Apache-2.0"
 license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: OS Independent",
@@ -33,14 +33,14 @@ classifiers = [
   "Topic :: Software Development :: Testing",
   "Topic :: Software Development :: Libraries",
 ]
-readme = "README.md"
+readme = "README_PKCS11.md"
 
 [project.urls]
-Repository = "https://github.com/astral-sh/uv"
-Documentation = "https://docs.astral.sh/uv"
-Changelog = "https://github.com/astral-sh/uv/blob/main/CHANGELOG.md"
-Releases = "https://github.com/astral-sh/uv/releases"
-Discord = "https://discord.gg/astral-sh"
+Homepage = "https://github.com/dtrodrigues/uv-pkcs11"
+Repository = "https://github.com/dtrodrigues/uv-pkcs11"
+Upstream = "https://github.com/astral-sh/uv"
+Documentation = "https://github.com/dtrodrigues/uv-pkcs11/blob/pkcs11/README_PKCS11.md"
+"Upstream changelog" = "https://github.com/astral-sh/uv/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 bindings = "bin"

@@ -4,7 +4,9 @@ version = "0.12.10"
 description = "A Python package and project manager"
 edition = { workspace = true }
 rust-version = { workspace = true }
-homepage = { workspace = true }
+# Not the workspace homepage: maturin copies this field into the wheel's
+# Home-Page metadata, which must not point at the official uv package.
+homepage = "https://github.com/dtrodrigues/uv-pkcs11"
 documentation = "https://docs.astral.sh/uv"
 repository = { workspace = true }
 authors = { workspace = true }
