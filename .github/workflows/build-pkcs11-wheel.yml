@@ -1,0 +1,224 @@
+# Build and publish the uv-pkcs11 wheels: Linux (x86_64, aarch64) and
+# macOS (Apple Silicon).
+#
+# Triggered by fork release tags (e.g. `0.12.9-pkcs11`, `0.12.9.1-pkcs11`);
+# the package version comes from pyproject.toml's [project] version,
+# mirroring the upstream release with a fourth component (`0.12.9.1`) for
+# fork-side re-releases (crates/uv/Cargo.toml keeps the plain upstream
+# version: semver has no fourth component). Publishes to PyPI via trusted
+# publishing (the `pypi` environment).
+name: "Build uv-pkcs11 wheels"
+
+on:
+  push:
+    tags:
+      - "*-pkcs11"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Build the AWS-LC version pinned in Cargo.lock, not a system installation.
+  AWS_LC_SYS_USE_SYSTEM: "0"
+  PACKAGE_NAME: uv-pkcs11
+  MODULE_NAME: uv
+  PYTHON_VERSION: "3.11"
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: "10"
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_RELEASE_LTO: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      # Wheels are tested on the runner that built them (every runner is
+      # native for its target), so no cross-arch emulation is needed.
+      matrix:
+        platform:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            manylinux: "2_17"
+            docker_options: ""
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            # uv fails to build in the 2_17 container on aarch64; jemalloc
+            # needs 64K-page support on aarch64 kernels.
+            manylinux: "2_28"
+            docker_options: "-e JEMALLOC_SYS_WITH_LG_PAGE=16"
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            # No container on macOS; manylinux and docker options are ignored.
+            manylinux: "2_17"
+            docker_options: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          cache: ""
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: "Install SoftHSM (Linux)"
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends softhsm2
+
+      - name: "Install SoftHSM and OpenSSL (macOS)"
+        if: runner.os == 'macOS'
+        run: |
+          brew install softhsm openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+
+      - name: "Install Rust toolchain"
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          # Reads rust-toolchain.toml; the fallback covers older rustup.
+          rustup toolchain install || \
+            rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+
+      # The helper's integration tests provision scratch SoftHSM tokens and
+      # complete real client-authenticated handshakes. They skip silently
+      # when a tool is missing, so treat any skip as a CI failure.
+      - name: "SoftHSM helper tests"
+        run: |
+          cargo test -p rustls-pkcs11-identity -- --nocapture 2>&1 | tee helper-tests.log
+          if grep -q "skipping:" helper-tests.log; then
+            echo "SoftHSM scenarios were skipped; a required tool is missing" >&2
+            exit 1
+          fi
+
+      # No --features self-update: self-update would replace this fork with
+      # official uv binaries.
+      - name: "Build wheel"
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          sccache: false
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          docker-options: >-
+            -e AWS_LC_SYS_USE_SYSTEM -e CARGO_INCREMENTAL -e CARGO_NET_RETRY
+            -e CARGO_BUILD_JOBS -e CARGO_PROFILE_RELEASE_LTO
+            ${{ matrix.platform.docker_options }}
+          args: --release --locked --out dist --compatibility pypi
+
+      - name: "Test wheel"
+        run: |
+          pip install "${PACKAGE_NAME}" --no-index --find-links dist/ --force-reinstall
+          uv --version
+          uvx --version
+          python -m "${MODULE_NAME}" --version
+
+      # End-to-end: the installed wheel authenticates to a local mTLS index
+      # with an identity on a SoftHSM token, selected by a pkcs11: URI.
+      # (On macOS this relies on Homebrew's SoftHSM and OpenSSL from the
+      # install step above; the script itself is portable shell.)
+      - name: "PKCS#11 wheel smoke test"
+        run: scripts/pkcs11-smoke/run.sh
+
+      - name: "Upload wheels"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels_uv_pkcs11-${{ matrix.platform.target }}
+          path: dist
+
+  # The sdist must be built without a --target: maturin filters dependency
+  # collection by platform, which drops target-gated workspace crates (for
+  # example `uv-windows`) and produces an unbuildable sdist.
+  sdist:
+    name: sdist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Build sdist"
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          sccache: false
+          maturin-version: v1.14.1
+          command: sdist
+          args: --out dist
+
+      # Loading every manifest catches an incomplete workspace (the failure
+      # mode above) without paying for a full source build. Not --locked:
+      # maturin prunes non-dependency members from the sdist but ships the
+      # repository lockfile verbatim, so the lock is trimmed on first use.
+      - name: "Check the sdist workspace is complete"
+        run: |
+          rustup toolchain install
+          tar xzf dist/*.tar.gz -C "$RUNNER_TEMP"
+          cargo metadata --format-version 1 \
+            --manifest-path "$RUNNER_TEMP"/uv_pkcs11-*/Cargo.toml > /dev/null
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          cache: ""
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: "Install SoftHSM"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends softhsm2
+
+      # Prove the sdist builds, the way a user on a platform without a
+      # prebuilt wheel would. The wheel lands outside dist/ so the published
+      # artifact never contains this non-manylinux build.
+      - name: "Build a wheel from the sdist"
+        run: |
+          pip wheel --no-deps dist/*.tar.gz --wheel-dir "$RUNNER_TEMP/sdist-wheel"
+          pip install "${PACKAGE_NAME}" --no-index --find-links "$RUNNER_TEMP/sdist-wheel"
+          uv --version
+          uvx --version
+          python -m "${MODULE_NAME}" --version
+
+      - name: "PKCS#11 smoke test on the sdist wheel"
+        run: DIST="$RUNNER_TEMP/sdist-wheel" scripts/pkcs11-smoke/run.sh
+
+      - name: "Upload sdist"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels_uv_pkcs11-sdist
+          path: dist
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build, sdist]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+    permissions:
+      id-token: write # For trusted publishing.
+    steps:
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.7"
+          checksum: "788f18abea7c5f55d6216e4f5613fd89d4d59b631efeec117b2b07fe72f1da21"
+          enable-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheels_uv_pkcs11-*
+          path: wheels
+          merge-multiple: true
+      - name: Publish to PyPI
+        run: uv publish -v wheels/*
