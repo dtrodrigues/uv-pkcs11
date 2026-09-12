@@ -35,6 +35,7 @@ use rustls::{Error as RustlsError, SignatureAlgorithm, SignatureScheme};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+pub mod cli;
 pub mod inspect;
 
 /// A rustls client identity backed by a PKCS#11 certificate and private key.

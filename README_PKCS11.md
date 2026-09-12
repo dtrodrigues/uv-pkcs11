@@ -69,7 +69,7 @@ Notes:
   `keyUsage`, if present, must include `digitalSignature` (a
   `keyEncipherment`-only RSA key-exchange certificate is passed over), and
   its `extendedKeyUsage`, if present, must include `clientAuth`. Selecting
-  such a certificate explicitly reports the reason; `rustls-pkcs11-inspect`
+  such a certificate explicitly reports the reason; `uv-pkcs11-inspect`
   lists it next to the certificate.
 
 Known limitations (kept simple on purpose; both surface as TLS handshake
@@ -86,6 +86,35 @@ failures rather than discovery-time errors):
   mechanism it cannot use with the selected key (for example a key outside
   the mechanism's supported size range) fails in `C_Sign` during the
   handshake.
+
+### Diagnosing a token
+
+The wheel installs `uv-pkcs11-inspect` next to `uv` and `uvx`. It lists the
+tokens, certificates, and private keys a module exposes without login and
+applies the same selection rules as uv, so its verdict is what uv will do
+with the same URI. Pass the `pkcs11:` URI you intend to put in
+`SSL_CLIENT_CERT`, or just a module path; with no argument, the p11-kit proxy
+is inspected. The exit status is 0 when exactly one identity would be
+selected.
+
+```console
+$ uv-pkcs11-inspect 'pkcs11:?module-path=/path/to/pkcs11-module.so'
+Module: /path/to/pkcs11-module.so
+
+Token `MyToken` (slot 1)
+  Signing: RSA_PSS_SHA512, RSA_PSS_SHA384, RSA_PSS_SHA256, RSA_PKCS1_SHA512, ...
+  Certificates: 1
+    CKA_ID 3f9a…         label `My Certificate`
+  Private keys: 1
+    CKA_ID 3f9a…         label `My Key`  RSA_PSS_SHA512, RSA_PSS_SHA384, ...
+
+OK: exactly one usable identity across all tokens: token `MyToken`, CKA_ID 3f9a….
+```
+
+With several identities it prints `AMBIGUOUS` and their `CKA_ID`s, so you
+can add an `id=`, `token=`, or `object=` attribute to the URI; with none it
+prints `NOT USABLE` and a hint (for example that nothing is visible without
+login). `uv-pkcs11-inspect --version` reports the fork build it came from.
 
 ## Installation
 

@@ -98,6 +98,7 @@ owo-colors = { workspace = true }
 petgraph = { workspace = true }
 rkyv = { workspace = true }
 rustc-hash = { workspace = true }
+rustls-pkcs11-identity = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tar-codec = { workspace = true }

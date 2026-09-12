@@ -89,7 +89,9 @@ tokens, certificates, and private keys a module exposes without login and
 applies the same detection rules as the client, so its verdict is what
 `from_uri` will do. It takes a module path or the same `pkcs11:` URI the
 client uses (with no argument, the p11-kit proxy is inspected), and exits 0
-when exactly one identity would be selected:
+when exactly one identity would be selected. The command lives in the
+crate's `cli` module, so other binaries can ship it under their own name:
+the uv-pkcs11 wheel installs it as `uv-pkcs11-inspect`.
 
 ```console
 $ rustls-pkcs11-inspect /path/to/pkcs11-module.so

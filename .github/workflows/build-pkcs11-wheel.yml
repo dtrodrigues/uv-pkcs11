@@ -124,10 +124,12 @@ jobs:
           pip install "${PACKAGE_NAME}" --no-index --find-links dist/ --force-reinstall
           uv --version
           uvx --version
+          uv-pkcs11-inspect --version
           python -m "${MODULE_NAME}" --version
 
-      # End-to-end: the installed wheel authenticates to a local mTLS index
-      # with an identity on a SoftHSM token, selected by a pkcs11: URI.
+      # End-to-end: the installed wheel's uv-pkcs11-inspect approves the
+      # SoftHSM token, and the installed uv authenticates to a local mTLS
+      # index with the token identity, selected by a pkcs11: URI.
       # (On macOS this relies on Homebrew's SoftHSM and OpenSSL from the
       # install step above; the script itself is portable shell.)
       - name: "PKCS#11 wheel smoke test"
@@ -188,6 +190,7 @@ jobs:
           pip install "${PACKAGE_NAME}" --no-index --find-links "$RUNNER_TEMP/sdist-wheel"
           uv --version
           uvx --version
+          uv-pkcs11-inspect --version
           python -m "${MODULE_NAME}" --version
 
       - name: "PKCS#11 smoke test on the sdist wheel"

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # PKCS#11 smoke test for the built uv-pkcs11 wheel: provision a SoftHSM token
-# with a public-session-visible RSA identity, serve the built wheel from a
-# local mTLS package index, and verify that the installed uv presents the
-# token identity via an SSL_CLIENT_CERT pkcs11: URI.
+# with a public-session-visible RSA identity, check that the installed
+# uv-pkcs11-inspect approves it, serve the built wheel from a local mTLS
+# package index, and verify that the installed uv presents the token identity
+# via an SSL_CLIENT_CERT pkcs11: URI.
 #
 # Requires: softhsm2-util + the SoftHSM module, openssl, python3, cargo, and
-# the uv under test on PATH (override with UV=/path/to/uv). Wheels are served
-# from ./dist (override with DIST=...).
+# the uv under test on PATH (override with UV=/path/to/uv; uv-pkcs11-inspect
+# is expected next to it, override with INSPECT=...). Wheels are served from
+# ./dist (override with DIST=...).
 set -euo pipefail
 
 UV=${UV:-uv}
+INSPECT=${INSPECT:-$(dirname "$(command -v "$UV")")/uv-pkcs11-inspect}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 DIST=${DIST:-$REPO_ROOT/dist}
@@ -55,6 +58,18 @@ openssl x509 -in "$WORK/client.crt" -outform DER -out "$WORK/client.der"
 
 cargo run -q -p rustls-pkcs11-identity --example provision-softhsm -- \
   "$MODULE" smoke 1234 "$WORK/client.key.der" "$WORK/client.der" 01
+
+echo "--- the installed uv-pkcs11-inspect must select the token identity"
+"$INSPECT" --version
+set +e
+report=$("$INSPECT" "pkcs11:token=smoke?module-path=$MODULE")
+status=$?
+set -e
+printf '%s\n' "$report"
+if [ "$status" -ne 0 ] || ! grep -q "^OK: exactly one usable identity" <<<"$report"; then
+  echo "expected uv-pkcs11-inspect to exit 0 with exactly one usable identity (exit $status)" >&2
+  exit 1
+fi
 
 python3 "$SCRIPT_DIR/index_server.py" \
   --packages "$DIST" --cert "$WORK/server.crt" --key "$WORK/server.key" \
