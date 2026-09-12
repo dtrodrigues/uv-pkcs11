@@ -1,5 +1,7 @@
 # uv-pkcs11
 
+[![PyPI](https://img.shields.io/pypi/v/uv-pkcs11.svg)](https://pypi.org/project/uv-pkcs11/)
+
 **An unofficial fork of [uv](https://github.com/astral-sh/uv)** — the
 extremely fast Python package and project manager — with PKCS#11
 client-certificate (mTLS) support, so uv can authenticate to package indexes
@@ -14,8 +16,10 @@ new (beta): tested end to end against SoftHSM, with limited real-world
 provider mileage so far.
 
 This project is not affiliated with or endorsed by Astral. The fork lives at
-[github.com/dtrodrigues/uv-pkcs11](https://github.com/dtrodrigues/uv-pkcs11);
-for everything except the PKCS#11 additions, see the [upstream
+[github.com/dtrodrigues/uv-pkcs11](https://github.com/dtrodrigues/uv-pkcs11)
+and is published on PyPI as
+[uv-pkcs11](https://pypi.org/project/uv-pkcs11/); for everything except the
+PKCS#11 additions, see the [upstream
 documentation](https://docs.astral.sh/uv).
 
 ## Usage
@@ -122,7 +126,8 @@ login). `uv-pkcs11-inspect --version` reports the fork build it came from.
 $ pip install uv-pkcs11
 ```
 
-Wheels are built for Linux (x86_64 and aarch64) and macOS (Apple Silicon);
+Releases are published to PyPI at
+[pypi.org/project/uv-pkcs11](https://pypi.org/project/uv-pkcs11/). Wheels are built for Linux (x86_64 and aarch64) and macOS (Apple Silicon);
 other platforms build from the sdist. The distribution installs the `uv` and
 `uvx` commands and therefore **must not be installed alongside the official
 `uv` distribution** in the same environment — install one or the other.
