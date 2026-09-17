@@ -130,7 +130,9 @@ const STYLES: Styles = Styles::styled()
 
 #[derive(Parser)]
 #[command(name = "uv", author, long_version = crate::version::uv_self_version())]
-#[command(about = "An extremely fast Python package manager.")]
+#[command(
+    about = "An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support."
+)]
 #[command(
     after_help = "Use `uv help` for more details.",
     after_long_help = "",
