@@ -5851,6 +5851,7 @@ dependencies = [
  "reqwest",
  "rkyv",
  "rustc-hash",
+ "rustls-pkcs11-identity",
  "self-replace",
  "serde",
  "serde_json",
