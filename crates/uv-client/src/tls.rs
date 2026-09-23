@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
 use reqwest::{Certificate, Identity};
+use rustls::RootCertStore;
 use rustls_native_certs::{CertificateResult, load_certs_from_paths};
 use rustls_pki_types::CertificateDer;
 use tracing::{debug, warn};
@@ -454,6 +455,12 @@ impl Certificates {
                 }
             })
             .collect()
+    }
+
+    pub(crate) fn to_root_store(&self) -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        roots.add_parsable_certificates(self.0.clone());
+        roots
     }
 
     /// Iterate over raw DER certificates.
