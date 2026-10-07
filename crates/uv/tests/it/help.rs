@@ -30,7 +30,7 @@ fn help() {
     uv_snapshot!(context.filters(), context.help(), @r#"
     exit_code: 0 (success)
     ----- stdout -----
-    An extremely fast Python package manager.
+    An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support.
 
     Usage: uv [OPTIONS] <COMMAND>
 
@@ -111,7 +111,7 @@ fn help_flag() {
     uv_snapshot!(context.filters(), context.command().arg("--help"), @r#"
     exit_code: 0 (success)
     ----- stdout -----
-    An extremely fast Python package manager.
+    An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support.
 
     Usage: uv [OPTIONS] <COMMAND>
 
@@ -191,7 +191,7 @@ fn help_short_flag() {
     uv_snapshot!(context.filters(), context.command().arg("-h"), @r#"
     exit_code: 0 (success)
     ----- stdout -----
-    An extremely fast Python package manager.
+    An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support.
 
     Usage: uv [OPTIONS] <COMMAND>
 
@@ -1043,7 +1043,7 @@ fn help_with_global_option() {
     uv_snapshot!(context.filters(), context.help().arg("--no-cache"), @r#"
     exit_code: 0 (success)
     ----- stdout -----
-    An extremely fast Python package manager.
+    An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support.
 
     Usage: uv [OPTIONS] <COMMAND>
 
@@ -1159,7 +1159,7 @@ fn help_with_no_pager() {
     uv_snapshot!(context.filters(), context.help().arg("--no-pager"), @r#"
     exit_code: 0 (success)
     ----- stdout -----
-    An extremely fast Python package manager.
+    An extremely fast Python package manager. uv-pkcs11 fork with PKCS#11 client-certificate support.
 
     Usage: uv [OPTIONS] <COMMAND>
 
