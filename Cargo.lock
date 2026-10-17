@@ -5819,6 +5819,7 @@ dependencies = [
  "predicates",
  "regex",
  "reqwest",
+ "rustls-pkcs11-identity",
  "self-replace",
  "serde",
  "serde_json",
